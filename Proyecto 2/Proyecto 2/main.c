@@ -1,0 +1,240 @@
+/******************************************************************************
+; Universidad del Valle de Guatemala
+; 1E2023: Programacion de Microcontroladores
+; main.c
+; Autor: Jacob Tabush
+; Proyecto: Proyecto 2
+; Hardware: ATMEGA328P
+; Creado: 8/05/2024
+; Ultima modificacion: 22/05/2024
+*******************************************************************************/
+
+#define F_CPU 1000000
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <stdbool.h>
+#include <util/delay.h>
+#include <avr/eeprom.h>
+#include "PWM.h"
+
+void initADC(void);
+void convertADC(char channel);
+void moveServos(uint16_t servo1, uint16_t servo2, uint16_t servo3, uint16_t servo4);
+
+const uint8_t timer2reset = 255;
+const uint16_t debouncetimerrestart = 5;
+
+uint8_t debouncetimer = 0;
+
+bool eepromactive = 0;
+bool adafruitactive = 0; 
+uint8_t eepromselect = 0;
+
+uint8_t recordlight = 0;
+const uint8_t recordlightrestart = 5;
+
+// Grabamos los valores que medimos en los ADCs en estos variables
+uint8_t ADCResult1 = 0;
+uint8_t ADCResult2 = 0;
+uint8_t ADCResult3 = 0;
+uint8_t ADCResult4 = 0;
+
+uint8_t ADCChannel = 6; //Canal ADC seleccionado
+
+void setup(void)
+{
+	cli();
+	
+	// Control prescaler
+	CLKPR = (0b10000000); // habilitamos cambios del prescale
+	CLKPR = (0x03); // Colocamos prescaler de 8
+
+	//Inicializamos botones (C0 - C3 para control de EEPROM)
+	PCICR = (0b00000011);
+	PCMSK1 = (1<<PCINT8) | (1<<PCINT9) | (1<<PCINT10) | (1<<PCINT11); //Interrupts en C0 - C3
+	PCMSK0 = (1<<PCINT5);
+	PORTC = (1<<PORTC0) | (1<<PORTC1) | (1<<PORTC2) | (1<<PORTC3); //Pullup
+	PORTB |= (1<<PORTB5);
+	DDRC = 0;
+
+	// Inicializacion PWM
+	initPWM0FastA(reset, no_invertido, 256); // Activamos timer 0 en modo pwm, utilizando OCR0A y OCR0B
+	initPWM0FastB(no_reset, no_invertido, 256);
+	initPWM2FastA(reset, no_invertido, 128);
+	initPWM2FastB(no_reset, no_invertido, 128);
+	
+	//Inicializamos Timer2 para debounce y "PWM"
+	TCCR1A = 0;
+	TCCR1B = 0b00000001; //Prescaler 256
+	TIMSK1 = 0x01; //Overflow interrupt
+	TCNT1 = 0xFFFF - timer2reset; 
+
+	DDRD |= 0b10010100; // D2 y D4 - luces mostrando eeprom seleccionado
+	//D7 - luz mostrando que se esta desplegando luz */
+	
+	initADC();
+	
+	sei();
+}
+
+int main(void)
+{
+	setup();
+	
+	
+	while (1) //Ejecutamos los ADCs de los 3 channels
+	{
+		
+		//Bloque principal
+		
+		if (!eepromactive) {//Si el eeprom esta desactivado revisamos datos del ADC
+		for (int i = 4; i < 8; i++) {
+		ADCChannel = i; //iniciamos el ADC convirtiendo el canal 4
+		convertADC(i);
+		_delay_ms(300);
+		}}
+		else if (eepromactive) { //Si el eeprom esta activado 
+			PORTD |= (1<<PORTD7);
+			uint8_t eepromdata[4];
+			uint8_t eepromaddress = eepromselect * 4;
+			
+			eeprom_read_block(eepromdata, eepromaddress, 4);
+			moveServos(eepromdata[0], eepromdata[1], eepromdata[2], eepromdata[1]);
+		}
+	}
+}
+
+//////////////////////////////////////////////////////
+// Funciones ADC
+//////////////////////////////////////////////////////
+
+void initADC(void) //Funcion para inicializar el ADC
+{
+	ADMUX = 0;
+	
+	ADMUX |= (1<<REFS0); //conectamos a AVcc
+	ADMUX &= ~(1<<REFS1);
+	
+	ADMUX |= (1<<ADLAR); // Justificado a la izquierda
+	
+	ADCSRA |= (1<<ADEN); //Encendemos el ADC
+	ADCSRA |= (1<<ADIE); // Encendemos el interrupt
+	ADCSRA |= (0b00000100); //Prescaler de 16
+}
+
+void convertADC(char channel) //Funcion para leer info ADC
+{	ADMUX &= ~(0x0F); // Borramos los ultimos 4 bits de ADMUX
+	
+	if (channel > 8) {channel = 8;} //valor maximo es 8
+	
+	if (channel < 6) {DIDR0 = channel;}
+	
+	ADMUX |= channel; // seleccionamos el canal correcto
+	ADCSRA |= (1<<ADSC); // iniciamos el ADC
+}
+
+//////////////////////////////////////////////////////
+// Funciones ISR
+//////////////////////////////////////////////////////
+
+ISR(ADC_vect){
+	cli();
+	 //Los siguientes toman los valores de los ADCs y los graban en sus ADCs respectivos 
+	if (ADCChannel == 5) {
+		ADCResult1 = ADCH;}
+	else if (ADCChannel == 4) {
+		ADCResult2 = ADCH;
+	}
+	else if (ADCChannel == 6) {
+		ADCResult3 = ADCH;
+	}
+	else if (ADCChannel == 7) {
+		ADCResult4 = ADCH;
+	} 
+	
+	if (!(eepromactive | adafruitactive)) {moveServos(ADCResult1, ADCResult2, ADCResult3, ADCResult4);}
+
+	// transformamos el resultado de ADC para usarlo para timer1
+	
+	sei();
+	ADCSRA |= (1<<ADIF);
+	
+	return;
+}
+
+// ISR de timer2 para debounce
+ISR(TIMER1_OVF_vect){
+	
+	if (debouncetimer > 0) {
+		debouncetimer--; //Decrementamos el timer de debounce
+	}
+	
+	if (~eepromactive){
+	if (recordlight > 0) {
+		recordlight--; // Para tener un efecto de un luz momentaneo al momento de apachar grabar
+	}
+	else {PORTD &= ~(1<<PORTD7);
+	}
+	}
+	
+	TCNT1 = 0xFF - timer2reset;
+	//TIFR1 |= (1 << TOV1);
+}
+
+// ISR de botones para EEPROM
+ISR(PCINT1_vect){
+	
+	if (debouncetimer != 0) {return;}
+		else {debouncetimer = debouncetimerrestart; //encendemos debounce
+		}
+		
+	if ((PINC & (0b00000001)) == 0) { //C0 - next eeprom
+		eepromselect++;
+		if (eepromselect > 0b00000011) {eepromselect = 0;}
+		
+		//Desplegamos luz eeprom
+		PORTD &= 0b11101011;
+		PORTD |= ((eepromselect & 0x01) << 2);
+		PORTD |= ((eepromselect & 0x02) << 3);
+	}
+	else if ((((PINC & (0b00000010)) == 0) & ~(eepromactive))) { //C1 - record
+		//encendemos un luz para un segundo para mostrar que grabamos el valor
+		recordlight = recordlightrestart;
+		PORTD |= (1<<PORTD7);
+		
+		//Grabamos el valor a eeprom
+		uint8_t eepromdata[4] = {ADCResult1, ADCResult2, ADCResult3, ADCResult4};
+		uint8_t eepromaddress = eepromselect * 4;
+		eeprom_write_block(eepromdata, eepromaddress, 4);
+	}
+	
+	if ((PINC & (0b00000100)) == 0) { //C2 - next eeprom
+		
+		if (eepromactive) {PORTD &= ~(1<<PORTD7);
+		eepromactive = 0;}
+			else {PORTD |= (1<<PORTD7);
+			eepromactive = 1;}
+	}
+	
+	
+	
+}
+
+
+//Este funcion sirve para mover los 4 servos
+void moveServos(uint16_t servo1, uint16_t servo2, uint16_t servo3, uint16_t servo4) { 
+	
+	uint16_t ADCRT1 = servo1/8 + 7;
+	updateDutyCycle2A(ADCRT1);	
+	
+	uint16_t ADCRT2 = servo2/8 + 7;
+	updateDutyCycle2B(ADCRT2);
+	
+	uint8_t ADCRT3 = servo3/16 + 4;
+	updateDutyCycle0A(ADCRT3);
+	
+	uint8_t ADCRT4 = servo4/16 + 4;
+	updateDutyCycle0B(ADCRT4);
+	
+}
