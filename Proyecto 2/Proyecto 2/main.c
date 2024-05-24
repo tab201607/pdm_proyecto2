@@ -9,7 +9,7 @@
 ; Ultima modificacion: 22/05/2024
 *******************************************************************************/
 
-#define F_CPU 1000000
+#define F_CPU 2000000
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
@@ -22,10 +22,18 @@ void initADC(void);
 void convertADC(char channel);
 void moveServos(uint16_t servo1, uint16_t servo2, uint16_t servo3, uint16_t servo4);
 
+void initUART9600(void);
+void writeUART(char senddata);
+void writeString(char* senddata);
+void sendnumberasstring(char datain);
+
 const uint8_t timer2reset = 255;
-const uint16_t debouncetimerrestart = 5;
+const uint16_t debouncetimerrestart = 8;
 
 uint8_t debouncetimer = 0;
+uint8_t debouncetimer2 = 0;
+uint16_t senddatatimer = 0;
+const uint16_t sendatatimerrestart = 8;
 
 bool eepromactive = 0;
 bool adafruitactive = 0; 
@@ -41,6 +49,11 @@ uint8_t ADCResult3 = 0;
 uint8_t ADCResult4 = 0;
 
 uint8_t ADCChannel = 6; //Canal ADC seleccionado
+
+char basestring[] = "BASE\n";
+char hombrostring[] = "HOMBRO\n";
+char codostring[] = "CODO\n";
+char pinzastring[] = "PINZA\n";
 
 void setup(void)
 {
@@ -71,9 +84,12 @@ void setup(void)
 	TCNT1 = 0xFFFF - timer2reset; 
 
 	DDRD |= 0b10010100; // D2 y D4 - luces mostrando eeprom seleccionado
-	//D7 - luz mostrando que se esta desplegando luz */
+	//D7 - luz eeprom activo */
+	DDRB |= (1<<DDB4); // Luz para mostrar que adafruit esta activo
 	
 	initADC();
+	
+	initUART9600();
 	
 	sei();
 }
@@ -93,14 +109,41 @@ int main(void)
 		ADCChannel = i; //iniciamos el ADC convirtiendo el canal 4
 		convertADC(i);
 		_delay_ms(300);
-		}}
+		}
+		
+		if (senddatatimer == 0) {
+		//Mandar valor base
+		uint16_t angleresult1 = ADCResult1 * 6 / 17; //0-255 -> 0-90
+		writeString(basestring);
+		sendnumberasstring(angleresult1);
+		
+		//Mandar valor codo
+		uint16_t angleresult2 = ADCResult2 * 6/17; //0-255 -> 0-90
+		writeString(codostring);
+		sendnumberasstring(angleresult2);
+		
+		//Mandar valor hombro
+		uint16_t angleresult3 = ADCResult3 * 4/17 + 60; //0-255 -> 60-120
+		writeString(hombrostring);
+		sendnumberasstring(angleresult3);
+		
+		//Mandar valor pinza
+		uint16_t angleresult4 = ADCResult4 * 5/17; //0-255 -> 0-75
+		writeString(pinzastring);
+		sendnumberasstring(angleresult4);
+		
+		senddatatimer = sendatatimerrestart;
+		}
+		else {senddatatimer--;}
+		
+		}
 		else if (eepromactive) { //Si el eeprom esta activado 
 			PORTD |= (1<<PORTD7);
 			uint8_t eepromdata[4];
 			uint8_t eepromaddress = eepromselect * 4;
 			
 			eeprom_read_block(eepromdata, eepromaddress, 4);
-			moveServos(eepromdata[0], eepromdata[1], eepromdata[2], eepromdata[1]);
+			moveServos(eepromdata[0], eepromdata[1], eepromdata[2], eepromdata[3]);
 		}
 	}
 }
@@ -141,12 +184,12 @@ void convertADC(char channel) //Funcion para leer info ADC
 ISR(ADC_vect){
 	cli();
 	 //Los siguientes toman los valores de los ADCs y los graban en sus ADCs respectivos 
-	if (ADCChannel == 5) {
+	if (ADCChannel == 4) {
 		ADCResult1 = ADCH;}
-	else if (ADCChannel == 4) {
+	else if (ADCChannel == 6) {
 		ADCResult2 = ADCH;
 	}
-	else if (ADCChannel == 6) {
+	else if (ADCChannel == 5) {
 		ADCResult3 = ADCH;
 	}
 	else if (ADCChannel == 7) {
@@ -170,6 +213,10 @@ ISR(TIMER1_OVF_vect){
 		debouncetimer--; //Decrementamos el timer de debounce
 	}
 	
+	if (debouncetimer2 > 0) {
+		debouncetimer2--; //Decrementamos el timer de debounce
+	}
+	
 	if (~eepromactive){
 	if (recordlight > 0) {
 		recordlight--; // Para tener un efecto de un luz momentaneo al momento de apachar grabar
@@ -180,6 +227,17 @@ ISR(TIMER1_OVF_vect){
 	
 	TCNT1 = 0xFF - timer2reset;
 	//TIFR1 |= (1 << TOV1);
+}
+
+ISR(PCINT0_vect){ //Apagar y encender modo adafruit
+	if (debouncetimer2 != 0) {return;}
+	else {debouncetimer2 = 10; //encendemos debounce
+	}
+	
+	if (adafruitactive) {PORTB &= ~(1<<PORTB4);
+		adafruitactive = 0;}
+	else {PORTB |= (1<<PORTB4);
+		adafruitactive = 1;}
 }
 
 // ISR de botones para EEPROM
@@ -209,7 +267,7 @@ ISR(PCINT1_vect){
 		eeprom_write_block(eepromdata, eepromaddress, 4);
 	}
 	
-	if ((PINC & (0b00000100)) == 0) { //C2 - next eeprom
+	if ((PINC & (0b00000100)) == 0) { //C2 - play
 		
 		if (eepromactive) {PORTD &= ~(1<<PORTD7);
 		eepromactive = 0;}
@@ -217,24 +275,60 @@ ISR(PCINT1_vect){
 			eepromactive = 1;}
 	}
 	
-	
-	
 }
 
 
 //Este funcion sirve para mover los 4 servos
 void moveServos(uint16_t servo1, uint16_t servo2, uint16_t servo3, uint16_t servo4) { 
 	
-	uint16_t ADCRT1 = servo1/8 + 7;
-	updateDutyCycle2A(ADCRT1);	
+	uint16_t ADCRT1 = servo1/16 + 7; 
+	updateDutyCycle2A(ADCRT1);	//Base 0 - 90 grados
 	
-	uint16_t ADCRT2 = servo2/8 + 7;
-	updateDutyCycle2B(ADCRT2);
+	uint16_t ADCRT2 = servo2/16 + 7; 
+	updateDutyCycle2B(ADCRT2); //Codo 0-90
 	
-	uint8_t ADCRT3 = servo3/16 + 4;
-	updateDutyCycle0A(ADCRT3);
+	uint8_t ADCRT3 = servo3/48 + 9;
+	updateDutyCycle0A(ADCRT3); //Hombro 60 - 120 grados
 	
-	uint8_t ADCRT4 = servo4/16 + 4;
-	updateDutyCycle0B(ADCRT4);
+	uint8_t ADCRT4 = servo4/38 + 4;
+	updateDutyCycle0B(ADCRT4); //Pinza 0 - 75 grados
 	
+}
+
+//Funciones UART
+
+void initUART9600(void) {
+	DDRD |= (1<<DDD1); // arreglamos d0 y d1
+	
+	UCSR0A = 0;
+	UCSR0A |= (1<<U2X0); // double speed
+	
+	UCSR0B = 0;
+	UCSR0B |= (1<<RXCIE0)|(1<<RXEN0)|(1<<TXEN0); //RX con interrupt y TX encendido
+	
+	UCSR0C = 0;
+	UCSR0C |= (1<< UCSZ01)|(1<<UCSZ00); //8 bits sin paridad con 1 bit de stop
+	
+	UBRR0 = 25; //Baud rate de 9600 para prescaler de 2MHz
+	
+}
+
+
+
+void writeUART(char senddata){ // Funcion para mandar un caracter por UART
+	while(!(UCSR0A & (1<<UDRE0) )); // Revisamos si el buffer esta lleno
+	UDR0 = senddata; //Colocamos el valor a mandar
+}
+
+void writeString(char* senddata){ //Funcion para mandar varios datos
+	for (uint8_t i = 0; senddata[i] != '\0'; i++) { //Seguimos mandando hasta que nos topamos con un caracter vacio
+		writeUART(senddata[i]);
+	}
+}
+
+void sendnumberasstring(char datain){
+	writeUART(datain/100 + 0x30); // desplegar cienes
+	writeUART((datain % 100)/10 + 0x30); // desplegar decenas
+	writeUART((datain % 100) % 10 + 0x30); //desplegar unidades
+	writeUART(10); //newline
 }
