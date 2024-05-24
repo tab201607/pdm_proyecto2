@@ -11,7 +11,7 @@ from Adafruit_IO import MQTTClient
 # holds the count for the feed
 global run_count
 
-ADAFRUIT_AIO_USERNAME = "user"
+# colocar user y pass
 
 # Set to the ID of the feed to subscribe to for updates.
 #feedContador = 'contador'
