@@ -12,8 +12,7 @@ from Adafruit_IO import MQTTClient
 global run_count
 
 ADAFRUIT_AIO_USERNAME = "tab201607"
-ADAFRUIT_AIO_KEY      = "aio_GltF235Yxy59m3w8QXz5tQlLjUrV"
-
+ADAFRUIT_AIO_KEY      = "key
 # Set to the ID of the feed to subscribe to for updates.
 #feedContador = 'contador'
 feedBase = 'Base'
